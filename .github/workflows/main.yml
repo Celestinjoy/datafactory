@@ -1,0 +1,96 @@
+trigger: none
+pr: none
+
+variables:
+  environment: 'dev' # default environment; you can override per branch
+  tf_working_dir: 'Terraform-setup-1'
+
+stages:
+- stage: Terraform_Validate_Plan
+  displayName: "Terraform Validate and Plan"
+  jobs:
+  - job: plan
+    displayName: "Terraform Init and Plan"
+    pool:
+      name: 'Default'  # your self-hosted Windows agent pool
+
+    steps:
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: 'Terraform Init & Plan'
+      inputs:
+        azureSubscription: 'my_first_service_connection'
+        scriptType: 'ps'  # Use PowerShell for Windows agent
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          cd "$env:BUILD_SOURCESDIRECTORY\${{ variables.tf_working_dir }}"
+          terraform init 
+          terraform validate
+          terraform plan -var-file="envs/${{ variables.environment }}.tfvars" -out=tfplan
+          terraform show -no-color tfplan > tfplan.txt
+
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish Terraform Plan'
+      inputs:
+        targetPath: '$(System.DefaultWorkingDirectory)\${{ variables.tf_working_dir }}\tfplan'
+        artifact: 'terraformPlan'
+
+- stage: Terraform_Apply
+  displayName: "Terraform Apply"
+  dependsOn: Terraform_Validate_Plan
+  condition: succeeded()
+
+  jobs:
+  - deployment: apply
+    displayName: "Terraform Apply to Azure"
+    environment: '${{ variables.environment }}'
+    pool:
+      name: 'Default'  # your self-hosted Windows agent pool
+
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: terraformPlan
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Apply'
+            inputs:
+              azureSubscription: 'my_first_service_connection'
+              scriptType: 'ps'  # PowerShell for Windows
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                cd "$env:BUILD_SOURCESDIRECTORY\${{ variables.tf_working_dir }}"
+                terraform init 
+                terraform apply -auto-approve tfplan
+                
+- stage: Terraform_Destroy
+  displayName: "Terraform Destroy"
+  dependsOn: Terraform_Apply
+  condition: succeeded()
+  # Uncomment below to make it manual trigger via UI approval
+  # approval checks can also be configured in Azure DevOps Environments UI
+
+  jobs:
+  - deployment: destroy
+    displayName: "Terraform Destroy Resources"
+    environment: '${{ variables.environment }}'
+    pool:
+      name: 'Default'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          - task: AzureCLI@2
+            displayName: 'Terraform Destroy'
+            inputs:
+              azureSubscription: 'my_first_service_connection'
+              scriptType: 'ps'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                cd "$env:BUILD_SOURCESDIRECTORY\${{ variables.tf_working_dir }}"
+                terraform init 
+                terraform destroy -auto-approve -var-file="envs/${{ variables.environment }}.tfvars"
